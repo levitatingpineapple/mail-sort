@@ -21,6 +21,7 @@ struct Args {
 }
 
 type Sorted = HashMap<String, HashSet<u32>>;
+
 #[tokio::main]
 async fn main() -> Result<(), Err> {
     let args = Args::parse();
@@ -75,6 +76,7 @@ fn sort_mail<T: Write + Read>(
     for (mailbox, ids) in sorted.iter() {
         if !existing.contains(mailbox) {
             session.create(mailbox)?;
+            session.subscribe(mailbox)?;
             println!("Created {}", mailbox);
         }
         let ids_string = ids
@@ -130,11 +132,21 @@ fn mailbox_from(address: &str) -> String {
     let mut parts = address.splitn(2, "@");
     let username = parts.next().expect("First part");
     if let Some(domain) = parts.next() {
-        string.push_str(domain);
+        push_no_dots(domain, &mut string);
     }
-    string.push_str("/");
-    string.push_str(username);
+    string.push('.');
+    push_no_dots(username, &mut string);
     string.to_lowercase()
+}
+
+fn push_no_dots(input: &str, base: &mut String) {
+    for char in input.chars() {
+        if char == '.' {
+            base.push('_');
+        } else {
+            base.push(char);
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -160,7 +172,7 @@ mod tests {
     #[test]
     fn address_to_mailbox() {
         assert_eq!(
-            "example.com/auth.service",
+            "example_com.auth_service",
             &mailbox_from("auth.service@example.com")
         );
     }

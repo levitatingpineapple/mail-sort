@@ -25,18 +25,18 @@ pub struct Pushover {
 
 impl Pushover {
     pub async fn notify(&self, mailboxes: HashSet<String>) {
-        let mut intersection: Vec<String> = self
-            .mailboxes
-            .intersection(&mailboxes)
-            .cloned()
-            .collect::<Vec<String>>();
-        if !intersection.is_empty() {
-            intersection.sort_unstable();
-            let text = intersection.join(", ");
-            println!("Notifying about: {}", text);
-            let message = MessageBuilder::new(&self.user, &self.token, &text).build();
-            // TODO: Log delivery failure
-            let _ = send_pushover_request(message).await;
+        if mailboxes.is_empty() {
+            return;
         }
+        let intersection = self.mailboxes.intersection(&mailboxes);
+        // Send a silent notification, if no subscribed mailboxes exist
+        let priority: i8 = if intersection.count() > 0 { 0 } else { -1 };
+        let text = mailboxes.into_iter().collect::<Vec<String>>().join(", ");
+        println!("Notifying about: {} (priority {})", text, priority);
+        let message = MessageBuilder::new(&self.user, &self.token, &text)
+            .set_priority(priority)
+            .build();
+        // TODO: Log delivery failure
+        let _ = send_pushover_request(message).await;
     }
 }
