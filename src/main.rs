@@ -9,6 +9,7 @@ use std::{
     fs::read_to_string,
     io::{self, Read, Write},
     path::PathBuf,
+    time::Duration,
 };
 
 mod config;
@@ -30,6 +31,9 @@ async fn main() -> Result<(), Err> {
         .connect()?
         .login(&config.imap.email, &config.imap.password)
         .map_err(|e| e.0)?;
+
+    session.debug = true;
+
     session.select("INBOX")?;
 
     // Do initial mail sort
@@ -37,13 +41,18 @@ async fn main() -> Result<(), Err> {
 
     loop {
         // Idle and wait for `Exists` messages which indicate mail count change
-        let result = session.idle().wait_while(|response| match response {
-            UnsolicitedResponse::Exists(_) => false,
-            _ => {
-                dbg!(response);
-                true
-            }
-        });
+        let result = {
+            let mut idle = session.idle();
+            idle.timeout(Duration::from_secs(5 * 60));
+            idle.wait_while(|response| match response {
+                UnsolicitedResponse::Exists(_) => false,
+                _ => {
+                    dbg!(response);
+                    true
+                }
+            })
+        };
+
         // Sort mail if mailbox has changed
         match result {
             Ok(wait_outcome) => match wait_outcome {
