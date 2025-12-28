@@ -3,7 +3,7 @@ use config::Config;
 use imap::{
     self, ClientBuilder, Session, extensions::idle::WaitOutcome, types::UnsolicitedResponse,
 };
-use mailparse::{self, MailAddr, addrparse_header, parse_header};
+use mailparse::{self, MailHeaderMap, addrparse, parse_headers};
 use std::{
     collections::{HashMap, HashSet},
     fs::read_to_string,
@@ -31,9 +31,7 @@ async fn main() -> Result<(), Err> {
         .connect()?
         .login(&config.imap.email, &config.imap.password)
         .map_err(|e| e.0)?;
-
-    session.debug = true;
-
+    session.debug = true; // Remove
     session.select("INBOX")?;
 
     // Do initial mail sort
@@ -85,7 +83,9 @@ fn sort_mail<T: Write + Read>(
     for (mailbox, ids) in sorted.iter() {
         if !existing.contains(mailbox) {
             session.create(mailbox)?;
-            session.subscribe(mailbox)?;
+            for path in with_parents(mailbox) {
+                session.subscribe(path)?;
+            }
             println!("Created {}", mailbox);
         }
         let ids_string = ids
@@ -103,6 +103,12 @@ fn sort_mail<T: Write + Read>(
     Ok(())
 }
 
+// Returns all parent mailboxes "foo.bar.baz" -> "foo", "foo.bar", "foo.bar.baz"
+fn with_parents(mailbox: &str) -> impl Iterator<Item = String> + '_ {
+    let parts: Vec<&str> = mailbox.split('.').collect();
+    (1..=parts.len()).map(move |i| parts[..i].join("."))
+}
+
 /// Returns names of all existing mailboxes
 fn mailboxes<T: Write + Read>(session: &mut Session<T>) -> Result<HashSet<String>, Err> {
     Ok(session
@@ -112,23 +118,22 @@ fn mailboxes<T: Write + Read>(session: &mut Session<T>) -> Result<HashSet<String
         .collect())
 }
 
-/// Returns messages sorted by (single!) `To` address.
 fn sort_inbox<T: Write + Read>(session: &mut Session<T>) -> Result<Sorted, Err> {
-    let fetches = session.uid_fetch("1:*", "BODY.PEEK[HEADER.FIELDS (TO)]")?;
+    // Fetch the headers that show actual delivery address
+    let fetches = session.uid_fetch("1:*", "BODY.PEEK[HEADER.FIELDS (X-PM-ORIGINAL-TO)]")?;
     let mut sorted = Sorted::new();
     for fetch in fetches.iter() {
         let header_data = fetch.header().ok_or(Err::MissingHeader)?;
-        let (mail_header, _) = parse_header(header_data)?;
-        let address_list = addrparse_header(&mail_header)?;
+        let (mail_header, _) = parse_headers(header_data)?;
         let uid = fetch.uid.ok_or(Err::MissingUid)?;
-        if let Some(address) = address_list.first() {
-            match address {
-                MailAddr::Group(_) => { /* Move groups manually */ }
-                MailAddr::Single(single) => {
-                    let mailbox = mailbox_from(&single.addr);
-                    let uids = sorted.entry(mailbox).or_insert(HashSet::default());
-                    uids.insert(uid);
-                }
+        let recipient = mail_header.get_first_value("X-Pm-Original-To");
+        println!("Found: {:?}", recipient);
+        if let Some(recipient_str) = recipient {
+            let address_list = addrparse(&recipient_str)?;
+            if let Some(address) = address_list.extract_single_info() {
+                let mailbox = mailbox_from(&address.addr);
+                let uids = sorted.entry(mailbox).or_insert(HashSet::default());
+                uids.insert(uid);
             }
         }
     }
@@ -137,25 +142,21 @@ fn sort_inbox<T: Write + Read>(session: &mut Session<T>) -> Result<Sorted, Err> 
 
 /// Converts email address in to a mailbox name
 fn mailbox_from(address: &str) -> String {
-    let mut string = String::new();
+    let mut mailbox_name = String::new();
     let mut parts = address.splitn(2, "@");
-    let username = parts.next().expect("First part");
+    let localpart = parts.next().expect("First part");
     if let Some(domain) = parts.next() {
-        push_no_dots(domain, &mut string);
-    }
-    string.push('.');
-    push_no_dots(username, &mut string);
-    string.to_lowercase()
-}
-
-fn push_no_dots(input: &str, base: &mut String) {
-    for char in input.chars() {
-        if char == '.' {
-            base.push('_');
-        } else {
-            base.push(char);
+        for char in domain.chars() {
+            if char == '.' {
+                mailbox_name.push('_');
+            } else {
+                mailbox_name.push(char);
+            }
         }
     }
+    mailbox_name.push('.');
+    mailbox_name.push_str(localpart);
+    mailbox_name.to_lowercase()
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -181,8 +182,26 @@ mod tests {
     #[test]
     fn address_to_mailbox() {
         assert_eq!(
-            "example_com.auth_service",
+            "example_com.auth.service",
             &mailbox_from("auth.service@example.com")
         );
+    }
+
+    #[test]
+    fn test_mailbox_hierarchy_nested() {
+        let result: Vec<String> = with_parents("foo.bar.baz").collect();
+        assert_eq!(result, vec!["foo", "foo.bar", "foo.bar.baz"]);
+    }
+
+    #[test]
+    fn test_mailbox_hierarchy_single() {
+        let result: Vec<String> = with_parents("inbox").collect();
+        assert_eq!(result, vec!["inbox"]);
+    }
+
+    #[test]
+    fn test_mailbox_hierarchy_empty() {
+        let result: Vec<String> = with_parents("").collect();
+        assert_eq!(result, vec![""]);
     }
 }
